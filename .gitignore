@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+tray_app.log
+build/
+dist/
+installer_output/
+*.spec
+Запустить.lnk
+launch_log.txt
+debug_log.txt
