@@ -63,13 +63,19 @@ def run_transcription(icon: pystray.Icon, recording_path):
         notify(icon, f"Транскрипция не удалась (неожиданная ошибка): {e}")
 
 
-def start_recording(icon: pystray.Icon, with_mic: bool):
+def start_recording(icon: pystray.Icon, with_mic: bool, with_system_audio: bool = False):
     if recorder.is_recording:
         return
     try:
-        recorder.start(with_mic=with_mic)
+        recorder.start(with_mic=with_mic, with_system_audio=with_system_audio)
         icon.icon = ICON_RECORDING
-        notify(icon, "Запись начата" + (" (экран + микрофон)" if with_mic else " (экран)"))
+        if with_system_audio:
+            label = " (экран + микрофон + системный звук)"
+        elif with_mic:
+            label = " (экран + микрофон)"
+        else:
+            label = " (экран)"
+        notify(icon, "Запись начата" + label)
     except RecordingError as e:
         notify(icon, f"Не удалось начать запись: {e}")
 
@@ -207,6 +213,11 @@ def build_menu() -> pystray.Menu:
         pystray.MenuItem(
             "Начать запись (экран + микрофон)",
             lambda icon, item: start_recording(icon, with_mic=True),
+            enabled=lambda item: not recorder.is_recording,
+        ),
+        pystray.MenuItem(
+            "Начать запись (экран + микрофон + системный звук)",
+            lambda icon, item: start_recording(icon, with_mic=True, with_system_audio=True),
             enabled=lambda item: not recorder.is_recording,
         ),
         pystray.MenuItem(

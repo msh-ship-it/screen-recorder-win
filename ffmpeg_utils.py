@@ -56,6 +56,7 @@ def list_dshow_audio_devices(ffmpeg_path: str) -> list[str]:
     result = subprocess.run(
         [ffmpeg_path, "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
         capture_output=True,
+        stdin=subprocess.DEVNULL,
     )
     # ffmpeg writes UTF-8 regardless of the console's active code page.
     output = (result.stderr or b"").decode("utf-8", errors="replace")

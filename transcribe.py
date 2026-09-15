@@ -22,6 +22,7 @@ def _has_audio_stream(ffprobe_path: str, source: Path) -> bool:
     result = subprocess.run(
         [ffprobe_path, "-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", str(source)],
         capture_output=True,
+        stdin=subprocess.DEVNULL,
         creationflags=CREATE_NO_WINDOW,
     )
     return bool(result.stdout.strip())
@@ -31,6 +32,7 @@ def _get_duration_seconds(ffprobe_path: str, source: Path) -> float:
     result = subprocess.run(
         [ffprobe_path, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(source)],
         capture_output=True,
+        stdin=subprocess.DEVNULL,
         creationflags=CREATE_NO_WINDOW,
     )
     try:
@@ -46,7 +48,7 @@ def _extract_compact_audio(ffmpeg_path: str, source: Path, dest: Path) -> None:
         "-vn", "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "64k",
         str(dest),
     ]
-    result = subprocess.run(cmd, capture_output=True, creationflags=CREATE_NO_WINDOW)
+    result = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
     if result.returncode != 0:
         raise TranscriptionError(f"ffmpeg audio extraction failed: {result.stderr[-1500:].decode(errors='replace')}")
 
@@ -60,7 +62,7 @@ def _split_audio(ffmpeg_path: str, source: Path, out_dir: Path, segment_seconds:
         "-c", "copy",
         str(pattern),
     ]
-    result = subprocess.run(cmd, capture_output=True, creationflags=CREATE_NO_WINDOW)
+    result = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
     if result.returncode != 0:
         raise TranscriptionError(f"ffmpeg split failed: {result.stderr[-1500:].decode(errors='replace')}")
     return sorted(out_dir.glob("part_*.m4a"))
