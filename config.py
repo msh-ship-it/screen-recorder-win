@@ -18,6 +18,9 @@ MIC_DEVICE_OVERRIDE = user_config.get("mic_device") or os.environ.get("SCREENREC
 
 FFMPEG_OVERRIDE = os.environ.get("SCREENRECORDER_FFMPEG", "").strip()
 
+MIC_TRACK_TITLE = "Microphone"
+SYSTEM_TRACK_TITLE = "System audio"
+
 RECORDINGS_DIR = Path.home() / "Videos" / "Recordings"
 TRANSCRIPTS_DIR = RECORDINGS_DIR
 

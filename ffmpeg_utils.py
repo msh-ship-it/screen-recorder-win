@@ -1,8 +1,6 @@
-"""Locate ffmpeg and enumerate DirectShow audio devices (microphones)."""
+"""Locate the ffmpeg / ffprobe executables."""
 import glob
-import re
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -50,48 +48,3 @@ def find_ffprobe(ffmpeg_path: str) -> str:
     if on_path:
         return on_path
     raise FileNotFoundError("ffprobe.exe not found next to ffmpeg or on PATH")
-
-
-def list_dshow_audio_devices(ffmpeg_path: str) -> list[str]:
-    result = subprocess.run(
-        [ffmpeg_path, "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
-        capture_output=True,
-        stdin=subprocess.DEVNULL,
-    )
-    # ffmpeg writes UTF-8 regardless of the console's active code page.
-    output = (result.stderr or b"").decode("utf-8", errors="replace")
-
-    devices = []
-
-    # ffmpeg >= 6: each device line is self-contained, e.g.
-    #   [in#0 @ ...] "Микрофон (Realtek(R) Audio)" (audio)
-    inline_re = re.compile(r'"(.+)"\s+\(audio\)\s*$')
-    for line in output.splitlines():
-        m = inline_re.search(line)
-        if m:
-            devices.append(m.group(1))
-    if devices:
-        return devices
-
-    # older ffmpeg: devices are grouped under section header lines
-    in_audio_section = False
-    name_re = re.compile(r'^\[dshow.*?\]\s+"(.+)"\s*$')
-    for line in output.splitlines():
-        if "DirectShow audio devices" in line:
-            in_audio_section = True
-            continue
-        if "DirectShow video devices" in line:
-            in_audio_section = False
-            continue
-        if in_audio_section and "Alternative name" not in line:
-            m = name_re.match(line)
-            if m:
-                devices.append(m.group(1))
-    return devices
-
-
-def default_mic_device(ffmpeg_path: str) -> str | None:
-    if config.MIC_DEVICE_OVERRIDE:
-        return config.MIC_DEVICE_OVERRIDE
-    devices = list_dshow_audio_devices(ffmpeg_path)
-    return devices[0] if devices else None

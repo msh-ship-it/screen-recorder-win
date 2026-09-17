@@ -1,5 +1,6 @@
-"""ffmpeg-backed screen (+ optional mic / system audio) capture for Windows."""
+"""Screen capture (ffmpeg gdigrab) with optional mic / system audio, muxed with sync."""
 import datetime
+import json
 import subprocess
 import tempfile
 import threading
@@ -7,7 +8,7 @@ from pathlib import Path
 
 import config
 import ffmpeg_utils
-from system_audio import SystemAudioRecorder, SystemAudioError
+from audio_capture import AudioCaptureError, AudioRecorder
 
 CREATE_NO_WINDOW = 0x08000000
 
@@ -21,9 +22,7 @@ class Recorder:
         self._proc: subprocess.Popen | None = None
         self._output_path: Path | None = None
         self._raw_video_path: Path | None = None
-        self._with_mic = False
-        self._system_audio: SystemAudioRecorder | None = None
-        self._system_audio_path: Path | None = None
+        self._audio: dict[str, tuple[AudioRecorder, Path]] = {}
         self._tmp_dir: tempfile.TemporaryDirectory | None = None
         self._lock = threading.Lock()
 
@@ -40,40 +39,30 @@ class Recorder:
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             output_path = config.RECORDINGS_DIR / f"recording_{timestamp}.mp4"
 
-            tmp_dir = None
-            system_audio = None
-            system_audio_path = None
-            raw_video_path = output_path
+            sources = [s for s, on in (("mic", with_mic), ("system", with_system_audio)) if on]
+            tmp_dir = tempfile.TemporaryDirectory(prefix="screenrecorder_") if sources else None
+            raw_video_path = Path(tmp_dir.name) / "video_raw.mp4" if tmp_dir else output_path
 
-            if with_system_audio:
-                tmp_dir = tempfile.TemporaryDirectory(prefix="screenrecorder_")
-                tmp_dir_path = Path(tmp_dir.name)
-                raw_video_path = tmp_dir_path / "video_raw.mp4"
-                system_audio_path = tmp_dir_path / "system_audio.wav"
+            audio = {}
+            try:
+                for source in sources:
+                    recorder = AudioRecorder(source, config.MIC_DEVICE_OVERRIDE if source == "mic" else "")
+                    wav_path = Path(tmp_dir.name) / f"{source}.wav"
+                    recorder.start(wav_path)
+                    audio[source] = (recorder, wav_path)
+            except AudioCaptureError as e:
+                for recorder, _ in audio.values():
+                    recorder.stop()
+                tmp_dir.cleanup()
+                raise RecordingError(str(e))
 
-                system_audio = SystemAudioRecorder()
-                try:
-                    system_audio.start(system_audio_path)
-                except SystemAudioError as e:
-                    tmp_dir.cleanup()
-                    raise RecordingError(f"Could not start system audio capture: {e}")
-
+            # -copyts keeps gdigrab's wall-clock frame timestamps, so the moment the
+            # video actually started can be compared with the audio start times.
             cmd = [ffmpeg_path, "-y", "-hide_banner", "-loglevel", "warning"]
+            if sources:
+                cmd += ["-copyts"]
             cmd += ["-f", "gdigrab", "-framerate", "30", "-i", "desktop"]
-
-            if with_mic:
-                mic_device = ffmpeg_utils.default_mic_device(ffmpeg_path)
-                if mic_device is None:
-                    if system_audio is not None:
-                        system_audio.stop()
-                        tmp_dir.cleanup()
-                    raise RecordingError("No microphone (DirectShow audio device) found")
-                cmd += ["-f", "dshow", "-i", f"audio={mic_device}"]
-
-            cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
-            if with_mic:
-                cmd += ["-c:a", "aac", "-b:a", "160k"]
-            cmd += [str(raw_video_path)]
+            cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", str(raw_video_path)]
 
             self._proc = subprocess.Popen(
                 cmd,
@@ -84,33 +73,65 @@ class Recorder:
             )
             self._output_path = output_path
             self._raw_video_path = raw_video_path
-            self._with_mic = with_mic
-            self._system_audio = system_audio
-            self._system_audio_path = system_audio_path
+            self._audio = audio
             self._tmp_dir = tmp_dir
             return output_path
 
-    def _mix_system_audio(
-        self, ffmpeg_path: str, raw_video_path: Path, system_audio_path: Path, with_mic: bool, output_path: Path
-    ) -> None:
-        cmd = [ffmpeg_path, "-y", "-hide_banner", "-loglevel", "warning"]
-        cmd += ["-i", str(raw_video_path), "-i", str(system_audio_path)]
-
-        if with_mic:
-            cmd += [
-                "-filter_complex", "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0[aout]",
-                "-map", "0:v", "-map", "[aout]",
-            ]
-        else:
-            cmd += ["-map", "0:v", "-map", "1:a", "-shortest"]
-
-        cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", "160k", str(output_path)]
-
+    @staticmethod
+    def _probe_video(ffprobe_path: str, path: Path) -> tuple[float, float]:
         result = subprocess.run(
-            cmd, capture_output=True, stdin=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW
+            [ffprobe_path, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=start_time,duration", "-of", "json", str(path)],
+            capture_output=True, stdin=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW,
         )
+        stream = json.loads(result.stdout or b"{}").get("streams", [{}])[0]
+        return float(stream.get("start_time", 0.0)), float(stream.get("duration", 0.0))
+
+    def _mux(self, raw_video_path: Path, audio: dict, output_path: Path) -> None:
+        ffmpeg_path = ffmpeg_utils.find_ffmpeg()
+        video_start, video_duration = self._probe_video(ffmpeg_utils.find_ffprobe(ffmpeg_path), raw_video_path)
+
+        cmd = [ffmpeg_path, "-y", "-hide_banner", "-loglevel", "warning", "-i", str(raw_video_path)]
+        filters, labels = [], {}
+        for source in ("mic", "system"):
+            if source not in audio:
+                continue
+            recorder, wav_path = audio[source]
+            cmd += ["-i", str(wav_path)]
+            lead = video_start - recorder.first_sample_time if recorder.first_sample_time else 0.0
+            if lead >= 0:
+                align = f"atrim=start={lead:.3f},asetpts=PTS-STARTPTS"
+            else:
+                align = f"adelay={int(-lead * 1000)}:all=1"
+            labels[source] = f"[{source}]"
+            filters.append(f"[{len(labels)}:a]{align}[{source}]")
+
+        maps = ["-map", "0:v"]
+        if len(labels) == 2:
+            # Track 0 is the mix for playback; tracks 1-2 keep the sources apart so
+            # transcription can tell the recording author from the other call participants.
+            filters += [
+                "[mic]asplit=2[mic_mix][mic_track]",
+                "[system]asplit=2[sys_mix][sys_track]",
+                "[mic_mix][sys_mix]amix=inputs=2:duration=longest:dropout_transition=0[mix]",
+            ]
+            maps += ["-map", "[mix]", "-map", "[mic_track]", "-map", "[sys_track]",
+                     "-disposition:a:0", "default", "-disposition:a:1", "0", "-disposition:a:2", "0",
+                     "-metadata:s:a:0", "title=Mix",
+                     "-metadata:s:a:1", f"title={config.MIC_TRACK_TITLE}",
+                     "-metadata:s:a:2", f"title={config.SYSTEM_TRACK_TITLE}"]
+        else:
+            maps += ["-map", next(iter(labels.values()))]
+
+        cmd += ["-filter_complex", ";".join(filters), *maps]
+        cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", "160k"]
+        if video_duration:
+            cmd += ["-t", f"{video_duration:.3f}"]
+        cmd += [str(output_path)]
+
+        result = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
         if result.returncode != 0:
-            raise RecordingError(f"Failed to mix system audio: {result.stderr[-1500:].decode(errors='replace')}")
+            raise RecordingError(f"Failed to combine audio and video: {result.stderr[-1500:].decode(errors='replace')}")
 
     def stop(self) -> Path:
         with self._lock:
@@ -133,25 +154,16 @@ class Recorder:
                     self._proc.kill()
 
             self._proc = None
+            output_path, raw_video_path = self._output_path, self._raw_video_path
+            audio, tmp_dir = self._audio, self._tmp_dir
+            self._output_path = self._raw_video_path = self._tmp_dir = None
+            self._audio = {}
 
-            output_path = self._output_path
-            raw_video_path = self._raw_video_path
-            with_mic = self._with_mic
-            system_audio = self._system_audio
-            system_audio_path = self._system_audio_path
-            tmp_dir = self._tmp_dir
-            self._output_path = None
-            self._raw_video_path = None
-            self._system_audio = None
-            self._system_audio_path = None
-            self._tmp_dir = None
-
-            if system_audio is not None:
-                system_audio.stop()
+            for recorder, _ in audio.values():
+                recorder.stop()
+            if audio:
                 try:
-                    self._mix_system_audio(
-                        ffmpeg_utils.find_ffmpeg(), raw_video_path, system_audio_path, with_mic, output_path
-                    )
+                    self._mux(raw_video_path, audio, output_path)
                 finally:
                     tmp_dir.cleanup()
 

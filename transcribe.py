@@ -1,4 +1,6 @@
 """Groq Whisper transcription for recorded files, with timecoded .docx output."""
+import json
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -15,19 +17,34 @@ CREATE_NO_WINDOW = 0x08000000
 # Groq answers 403 to every request (even unauthenticated) from blocked regions, incl. Russia.
 GEO_BLOCK_MESSAGE = "Groq недоступен из вашего региона (ошибка 403) — включите VPN и повторите"
 
+SPEAKER_ME = "Я"
+SPEAKER_OTHER = "Собеседник"
+
+# Whisper invents these on silence (subtitle credits from its training data).
+HALLUCINATION_RE = re.compile(
+    r"продолжение следует|субтитр|спасибо за просмотр|подписывайтесь на канал|редактор|корректор",
+    re.IGNORECASE,
+)
+
 
 class TranscriptionError(Exception):
     pass
 
 
-def _has_audio_stream(ffprobe_path: str, source: Path) -> bool:
+def _audio_stream_titles(ffprobe_path: str, source: Path) -> list[str]:
     result = subprocess.run(
-        [ffprobe_path, "-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", str(source)],
+        [ffprobe_path, "-v", "error", "-select_streams", "a",
+         "-show_entries", "stream=index:stream_tags", "-of", "json", str(source)],
         capture_output=True,
         stdin=subprocess.DEVNULL,
         creationflags=CREATE_NO_WINDOW,
     )
-    return bool(result.stdout.strip())
+    try:
+        streams = json.loads(result.stdout.decode("utf-8", errors="replace")).get("streams", [])
+    except json.JSONDecodeError:
+        return []
+    # ffmpeg writes a stream "title" into MP4 but reads it back as "name".
+    return [s.get("tags", {}).get("title") or s.get("tags", {}).get("name") or "" for s in streams]
 
 
 def _get_duration_seconds(ffprobe_path: str, source: Path) -> float:
@@ -43,11 +60,12 @@ def _get_duration_seconds(ffprobe_path: str, source: Path) -> float:
         return 0.0
 
 
-def _extract_compact_audio(ffmpeg_path: str, source: Path, dest: Path) -> None:
+def _extract_compact_audio(ffmpeg_path: str, source: Path, dest: Path, stream_index: int) -> None:
     cmd = [
         ffmpeg_path, "-y", "-hide_banner", "-loglevel", "warning",
         "-i", str(source),
-        "-vn", "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "64k",
+        "-map", f"0:a:{stream_index}",
+        "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "64k",
         str(dest),
     ]
     result = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
@@ -56,7 +74,7 @@ def _extract_compact_audio(ffmpeg_path: str, source: Path, dest: Path) -> None:
 
 
 def _split_audio(ffmpeg_path: str, source: Path, out_dir: Path, segment_seconds: int = 600) -> list[Path]:
-    pattern = out_dir / "part_%03d.m4a"
+    pattern = out_dir / f"{source.stem}_part_%03d.m4a"
     cmd = [
         ffmpeg_path, "-y", "-hide_banner", "-loglevel", "warning",
         "-i", str(source),
@@ -67,7 +85,7 @@ def _split_audio(ffmpeg_path: str, source: Path, out_dir: Path, segment_seconds:
     result = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
     if result.returncode != 0:
         raise TranscriptionError(f"ffmpeg split failed: {result.stderr[-1500:].decode(errors='replace')}")
-    return sorted(out_dir.glob("part_*.m4a"))
+    return sorted(out_dir.glob(f"{source.stem}_part_*.m4a"))
 
 
 def _post_to_groq(file_path: Path, api_key: str):
@@ -76,9 +94,20 @@ def _post_to_groq(file_path: Path, api_key: str):
             GROQ_URL,
             headers={"Authorization": f"Bearer {api_key}"},
             files={"file": (file_path.name, f, "audio/mp4")},
-            data={"model": config.GROQ_MODEL, "response_format": "verbose_json", "temperature": "0"},
+            data={
+                "model": config.GROQ_MODEL,
+                "response_format": "verbose_json",
+                "temperature": "0",
+                "timestamp_granularities[]": ["segment", "word"],
+            },
             timeout=300,
         )
+
+
+def _is_hallucination(segment: dict) -> bool:
+    if HALLUCINATION_RE.search(segment.get("text", "")):
+        return True
+    return segment.get("no_speech_prob", 0.0) >= 0.6 and segment.get("avg_logprob", 0.0) <= -0.5
 
 
 def _call_groq(file_path: Path) -> list[dict]:
@@ -92,18 +121,47 @@ def _call_groq(file_path: Path) -> list[dict]:
         raise TranscriptionError(f"Groq API error {response.status_code}: {response.text[:500]}")
 
     data = response.json()
-    segments = data.get("segments") or []
-    if not segments:
+    segments = data.get("segments")
+    if segments is None:
         text = (data.get("text") or "").strip()
-        if not text:
-            raise TranscriptionError("Groq returned an empty transcript")
-        return [{"start": 0.0, "end": 0.0, "text": text}]
+        return [{"start": 0.0, "end": 0.0, "text": text}] if text else []
 
-    return [
-        {"start": float(s.get("start", 0.0)), "end": float(s.get("end", 0.0)), "text": s.get("text", "").strip()}
-        for s in segments
-        if s.get("text", "").strip()
-    ]
+    # Whisper stretches a segment's start back over preceding silence; the first
+    # word's timestamp is where speech actually begins. This matters when two
+    # tracks are merged into one dialogue by time.
+    word_starts = sorted(float(w.get("start", 0.0)) for w in data.get("words") or [])
+
+    result = []
+    for s in segments:
+        text = s.get("text", "").strip()
+        if not text or _is_hallucination(s):
+            continue
+        start, end = float(s.get("start", 0.0)), float(s.get("end", 0.0))
+        first_word = next((w for w in word_starts if start <= w < end), None)
+        result.append({"start": first_word if first_word is not None else start, "end": end, "text": text})
+    return result
+
+
+def _transcribe_track(ffmpeg_path: str, ffprobe_path: str, source: Path, stream_index: int, tmp_dir: Path) -> list[dict]:
+    compact_audio = tmp_dir / f"track{stream_index}.m4a"
+    _extract_compact_audio(ffmpeg_path, source, compact_audio, stream_index)
+
+    if compact_audio.stat().st_size <= MAX_UPLOAD_BYTES:
+        parts = [compact_audio]
+    else:
+        parts = _split_audio(ffmpeg_path, compact_audio, tmp_dir)
+
+    segments = []
+    offset = 0.0
+    for part in parts:
+        for segment in _call_groq(part):
+            segments.append({
+                "start": segment["start"] + offset,
+                "end": segment["end"] + offset,
+                "text": segment["text"],
+            })
+        offset += _get_duration_seconds(ffprobe_path, part)
+    return segments
 
 
 def _format_timecode(seconds: float) -> str:
@@ -115,8 +173,17 @@ def _format_timecode(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+def _segment_line(segment: dict) -> str:
+    speaker = f"{segment['speaker']}: " if segment.get("speaker") else ""
+    return f"[{_format_timecode(segment['start'])}] {speaker}{segment['text']}"
+
+
 def segments_to_text(segments: list[dict]) -> str:
-    return "\n".join(f"[{_format_timecode(s['start'])}] {s['text']}" for s in segments)
+    return "\n".join(_segment_line(s) for s in segments)
+
+
+def has_speakers(segments: list[dict]) -> bool:
+    return any(s.get("speaker") for s in segments)
 
 
 def _add_markdown(doc: Document, markdown: str) -> None:
@@ -150,8 +217,12 @@ def build_docx(
         doc.add_paragraph(summary_note)
 
     doc.add_heading("Полная расшифровка", level=2)
+    if has_speakers(segments):
+        doc.add_paragraph(
+            f"«{SPEAKER_ME}» — автор записи (микрофон), «{SPEAKER_OTHER}» — все остальные участники звонка."
+        )
     for segment in segments:
-        doc.add_paragraph(f"[{_format_timecode(segment['start'])}] {segment['text']}")
+        doc.add_paragraph(_segment_line(segment))
 
     docx_path = config.TRANSCRIPTS_DIR / f"{recording_path.stem}_transcript.docx"
     try:
@@ -170,31 +241,22 @@ def transcribe_segments(recording_path: Path) -> list[dict]:
     ffmpeg_path = ffmpeg_utils.find_ffmpeg()
     ffprobe_path = ffmpeg_utils.find_ffprobe(ffmpeg_path)
 
-    if not _has_audio_stream(ffprobe_path, recording_path):
+    titles = _audio_stream_titles(ffprobe_path, recording_path)
+    if not titles:
         raise TranscriptionError("Recording has no audio track (no microphone) — nothing to transcribe")
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
-        compact_audio = tmp_dir / "audio.m4a"
-        _extract_compact_audio(ffmpeg_path, recording_path, compact_audio)
-
-        if compact_audio.stat().st_size <= MAX_UPLOAD_BYTES:
-            parts = [compact_audio]
+        if config.MIC_TRACK_TITLE in titles and config.SYSTEM_TRACK_TITLE in titles:
+            segments = []
+            for title, speaker in ((config.MIC_TRACK_TITLE, SPEAKER_ME), (config.SYSTEM_TRACK_TITLE, SPEAKER_OTHER)):
+                for segment in _transcribe_track(ffmpeg_path, ffprobe_path, recording_path, titles.index(title), tmp_dir):
+                    segments.append({**segment, "speaker": speaker})
+            segments.sort(key=lambda s: s["start"])
         else:
-            parts = _split_audio(ffmpeg_path, compact_audio, tmp_dir)
+            segments = _transcribe_track(ffmpeg_path, ffprobe_path, recording_path, 0, tmp_dir)
 
-        all_segments = []
-        offset = 0.0
-        for part in parts:
-            for segment in _call_groq(part):
-                all_segments.append({
-                    "start": segment["start"] + offset,
-                    "end": segment["end"] + offset,
-                    "text": segment["text"],
-                })
-            offset += _get_duration_seconds(ffprobe_path, part)
-
-    if not all_segments:
+    if not segments:
         raise TranscriptionError("Groq returned an empty transcript")
 
-    return all_segments
+    return segments

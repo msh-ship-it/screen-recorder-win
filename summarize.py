@@ -27,8 +27,21 @@ DECISION_RULE = (
     "конкретное, которую не отвергли, даже если сказано неформально («сделай», «попробуй "
     "доделать», «мне надо, чтобы ты…», «я потом потестирую»). Неформальные договорённости "
     "помечай «(предварительно)». Констатации фактов, мнения и размышления вслух решениями "
-    "не считаются. Имён в расшифровке может не быть и спикеры не размечены — тогда указывай "
-    "ответственного по контексту («собеседник», «автор записи») или «не указано»."
+    "не считаются. То, что отложили или оставили нерешённым, — не решение, а открытый вопрос."
+)
+
+OWNER_RULE_UNLABELED = (
+    "Спикеры в расшифровке не размечены. Если ответственный назван по имени — пиши имя, "
+    "иначе указывай его по контексту или «не указано»."
+)
+
+OWNER_RULE_LABELED = (
+    "Реплики помечены: «Я» — автор записи, «Собеседник» — любой другой участник звонка "
+    "(это может быть и клиент, и коллеги автора). Если ответственный назван по имени — пиши имя. "
+    "Иначе определяй его по тому, кто говорит: «я/мы сделаем», «на нашей стороне» в реплике «Я» — "
+    "ответственный «я»; «сделайте», «на вашей стороне» в реплике «Я» — «собеседник»; для реплик "
+    "«Собеседник» — наоборот. Если ответственный определён не по имени, добавь в скобках короткую "
+    "цитату и таймкод, например: собеседник («доступы на нашей стороне», 12:45)."
 )
 
 BRIEF_SHORT = "2–4 предложения: о чём был разговор и чем закончился."
@@ -38,7 +51,7 @@ BRIEF_LONG = (
 )
 
 
-def _final_instructions(brief_rule: str) -> str:
+def _final_instructions(brief_rule: str, owner_rule: str) -> str:
     return f"""Составь протокол встречи строго по такой структуре (Markdown):
 
 ## Кратко
@@ -47,7 +60,7 @@ def _final_instructions(brief_rule: str) -> str:
 ## Договорённости и решения
 Маркированный список. Каждый пункт в формате:
 - Что решили — ответственный: <кто или «не указано»>; срок: <когда или «не указано»>
-{DECISION_RULE} Если решений не было — один пункт «не было».
+{DECISION_RULE} {owner_rule} Если решений не было — один пункт «не было».
 
 ## Открытые вопросы
 Что осталось нерешённым или требует уточнения. Если таких нет — напиши «нет».
@@ -56,12 +69,13 @@ def _final_instructions(brief_rule: str) -> str:
 """
 
 
-CHUNK_INSTRUCTIONS = f"""Это фрагмент длинного разговора. Верни только JSON такого вида:
+def _chunk_instructions(owner_rule: str) -> str:
+    return f"""Это фрагмент длинного разговора. Верни только JSON такого вида:
 {{"topics": ["..."], "decisions": [{{"what": "...", "owner": "...", "deadline": "...", "timecode": "..."}}], "open_questions": ["..."]}}
 
 Правила:
 - topics — до 5 коротких тем фрагмента, без повторов.
-- decisions — все решения из фрагмента. {DECISION_RULE} owner и deadline — как прозвучало, иначе «не указано»; timecode — таймкод реплики.
+- decisions — все решения из фрагмента. {DECISION_RULE} {owner_rule} deadline — как прозвучало, иначе «не указано»; timecode — таймкод реплики.
 - open_questions — до 5 нерешённых вопросов.
 - Повторяющиеся реплики не дублируй. Если чего-то нет — пустой список."""
 
@@ -128,8 +142,8 @@ def _unique(items: list[str]) -> list[str]:
     return result
 
 
-def _chunk_notes(chunk: str) -> dict:
-    raw = _chat(f"{CHUNK_INSTRUCTIONS}\n\nРасшифровка:\n{chunk}", max_tokens=1500, json_mode=True)
+def _chunk_notes(chunk: str, owner_rule: str) -> dict:
+    raw = _chat(f"{_chunk_instructions(owner_rule)}\n\nРасшифровка:\n{chunk}", max_tokens=1500, json_mode=True)
     try:
         notes = json.loads(raw)
     except json.JSONDecodeError as e:
@@ -172,16 +186,18 @@ def _merge_notes(all_notes: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def summarize_transcript(transcript: str) -> str:
+def summarize_transcript(transcript: str, speakers_labeled: bool = False) -> str:
     """Returns the meeting summary as Markdown."""
     if not config.GROQ_API_KEY:
         raise SummaryError("GROQ_API_KEY is not configured")
 
+    owner_rule = OWNER_RULE_LABELED if speakers_labeled else OWNER_RULE_UNLABELED
+
     if len(transcript) <= MAX_CHUNK_CHARS:
-        instructions = _final_instructions(BRIEF_SHORT)
+        instructions = _final_instructions(BRIEF_SHORT, owner_rule)
         return _chat(f"{instructions}\n\nРасшифровка:\n{transcript}", max_tokens=2500)
 
-    all_notes = [_chunk_notes(chunk) for chunk in _split(transcript, MAX_CHUNK_CHARS)]
+    all_notes = [_chunk_notes(chunk, owner_rule) for chunk in _split(transcript, MAX_CHUNK_CHARS)]
     merged = _merge_notes(all_notes)
-    instructions = _final_instructions(BRIEF_LONG)
+    instructions = _final_instructions(BRIEF_LONG, owner_rule)
     return _chat(f"{instructions}\n\nЗаметки по фрагментам разговора:\n{merged}", max_tokens=2500)

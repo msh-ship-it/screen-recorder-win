@@ -13,7 +13,7 @@ import config
 import user_config
 from capture import Recorder, RecordingError
 from summarize import summarize_transcript
-from transcribe import build_docx, segments_to_text, transcribe_segments, TranscriptionError
+from transcribe import build_docx, has_speakers, segments_to_text, transcribe_segments, TranscriptionError
 
 GROQ_KEYS_URL = "https://console.groq.com/keys"
 
@@ -67,7 +67,7 @@ def run_transcription(icon: pystray.Icon, recording_path):
 
     notify(icon, "Расшифровка готова, готовлю саммари встречи…")
     try:
-        summary = summarize_transcript(segments_to_text(segments))
+        summary = summarize_transcript(segments_to_text(segments), speakers_labeled=has_speakers(segments))
         docx_path = build_docx(recording_path, segments, summary_markdown=summary)
         notify(icon, f"Расшифровка и саммари готовы: {docx_path.name}")
     except Exception as e:
