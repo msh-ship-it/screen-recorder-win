@@ -12,7 +12,8 @@ from PIL import Image, ImageDraw
 import config
 import user_config
 from capture import Recorder, RecordingError
-from transcribe import transcribe, TranscriptionError
+from summarize import summarize_transcript
+from transcribe import build_docx, segments_to_text, transcribe_segments, TranscriptionError
 
 GROQ_KEYS_URL = "https://console.groq.com/keys"
 
@@ -55,12 +56,23 @@ def notify(icon: pystray.Icon, message: str, title: str = "screen-recorder"):
 def run_transcription(icon: pystray.Icon, recording_path):
     notify(icon, f"Идёт транскрипция: {recording_path.name}")
     try:
-        transcript_path = transcribe(recording_path)
-        notify(icon, f"Транскрипт готов: {transcript_path.name}")
+        segments = transcribe_segments(recording_path)
+        build_docx(recording_path, segments, summary_note="Саммари готовится — файл обновится автоматически.")
     except TranscriptionError as e:
         notify(icon, f"Транскрипция не удалась: {e}")
+        return
     except Exception as e:
         notify(icon, f"Транскрипция не удалась (неожиданная ошибка): {e}")
+        return
+
+    notify(icon, "Расшифровка готова, готовлю саммари встречи…")
+    try:
+        summary = summarize_transcript(segments_to_text(segments))
+        docx_path = build_docx(recording_path, segments, summary_markdown=summary)
+        notify(icon, f"Расшифровка и саммари готовы: {docx_path.name}")
+    except Exception as e:
+        build_docx(recording_path, segments, summary_note=f"Не удалось сформировать саммари: {e}")
+        notify(icon, f"Расшифровка сохранена, но саммари не получилось: {e}")
 
 
 def start_recording(icon: pystray.Icon, with_mic: bool, with_system_audio: bool = False):
