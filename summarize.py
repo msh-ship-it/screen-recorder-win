@@ -31,13 +31,18 @@ DECISION_RULE = (
     "ответственного по контексту («собеседник», «автор записи») или «не указано»."
 )
 
-FINAL_INSTRUCTIONS = f"""Составь протокол встречи строго по такой структуре (Markdown):
+BRIEF_SHORT = "2–4 предложения: о чём был разговор и чем закончился."
+BRIEF_LONG = (
+    "Один связный абзац из 5–8 предложений: все основные темы разговора по порядку "
+    "и чем закончился разговор. Не пропускай темы из середины и конца."
+)
+
+
+def _final_instructions(brief_rule: str) -> str:
+    return f"""Составь протокол встречи строго по такой структуре (Markdown):
 
 ## Кратко
-2–4 предложения: о чём был разговор и чем закончился.
-
-## Что обсуждали
-Маркированный список ключевых тем, без повторов.
+{brief_rule}
 
 ## Договорённости и решения
 Маркированный список. Каждый пункт в формате:
@@ -47,9 +52,9 @@ FINAL_INSTRUCTIONS = f"""Составь протокол встречи стро
 ## Открытые вопросы
 Что осталось нерешённым или требует уточнения. Если таких нет — напиши «нет».
 
-## Следующие шаги
-Кто что делает дальше, по порядку. Если не обсуждалось — напиши «не указано».
+Других разделов не добавляй.
 """
+
 
 CHUNK_INSTRUCTIONS = f"""Это фрагмент длинного разговора. Верни только JSON такого вида:
 {{"topics": ["..."], "decisions": [{{"what": "...", "owner": "...", "deadline": "...", "timecode": "..."}}], "open_questions": ["..."]}}
@@ -173,8 +178,10 @@ def summarize_transcript(transcript: str) -> str:
         raise SummaryError("GROQ_API_KEY is not configured")
 
     if len(transcript) <= MAX_CHUNK_CHARS:
-        return _chat(f"{FINAL_INSTRUCTIONS}\n\nРасшифровка:\n{transcript}", max_tokens=2500)
+        instructions = _final_instructions(BRIEF_SHORT)
+        return _chat(f"{instructions}\n\nРасшифровка:\n{transcript}", max_tokens=2500)
 
     all_notes = [_chunk_notes(chunk) for chunk in _split(transcript, MAX_CHUNK_CHARS)]
     merged = _merge_notes(all_notes)
-    return _chat(f"{FINAL_INSTRUCTIONS}\n\nЗаметки по фрагментам разговора:\n{merged}", max_tokens=2500)
+    instructions = _final_instructions(BRIEF_LONG)
+    return _chat(f"{instructions}\n\nЗаметки по фрагментам разговора:\n{merged}", max_tokens=2500)
