@@ -18,6 +18,9 @@ MIC_DEVICE_OVERRIDE = user_config.get("mic_device") or os.environ.get("SCREENREC
 
 FFMPEG_OVERRIDE = os.environ.get("SCREENRECORDER_FFMPEG", "").strip()
 
+# "all" (whole desktop), "cursor" (screen under the mouse), or a device name like "\\\\.\\DISPLAY1"
+MONITOR = user_config.get("monitor", "all")
+
 MIC_TRACK_TITLE = "Microphone"
 SYSTEM_TRACK_TITLE = "System audio"
 
@@ -25,6 +28,12 @@ RECORDINGS_DIR = Path.home() / "Videos" / "Recordings"
 TRANSCRIPTS_DIR = RECORDINGS_DIR
 
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def set_monitor(value: str) -> None:
+    global MONITOR
+    MONITOR = value
+    user_config.set_value("monitor", value)
 
 
 def set_groq_api_key(key: str) -> None:

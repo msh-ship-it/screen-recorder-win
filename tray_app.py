@@ -10,6 +10,7 @@ import pystray
 from PIL import Image, ImageDraw
 
 import config
+import monitors
 import user_config
 from capture import Recorder, RecordingError
 from summarize import summarize_transcript
@@ -215,6 +216,41 @@ def exit_app(icon: pystray.Icon, item):
         tk_root.after(0, tk_root.quit)
 
 
+def select_monitor(icon: pystray.Icon, value: str):
+    config.set_monitor(value)
+    icon.update_menu()
+
+
+def build_monitor_menu() -> pystray.Menu:
+    items = [
+        pystray.MenuItem(
+            "Все экраны",
+            lambda icon, item: select_monitor(icon, "all"),
+            checked=lambda item: config.MONITOR == "all",
+            radio=True,
+        ),
+        pystray.MenuItem(
+            "Экран под курсором мыши",
+            lambda icon, item: select_monitor(icon, "cursor"),
+            checked=lambda item: config.MONITOR == "cursor",
+            radio=True,
+        ),
+        pystray.Menu.SEPARATOR,
+    ]
+    for number, monitor in enumerate(monitors.list_monitors(), start=1):
+        name = monitor["name"]
+        label = f"Экран {number} — {monitor['width']}×{monitor['height']}"
+        if monitor["primary"]:
+            label += " (основной)"
+        items.append(pystray.MenuItem(
+            label,
+            lambda icon, item, name=name: select_monitor(icon, name),
+            checked=lambda item, name=name: config.MONITOR == name,
+            radio=True,
+        ))
+    return pystray.Menu(*items)
+
+
 def build_menu() -> pystray.Menu:
     return pystray.Menu(
         pystray.MenuItem(
@@ -238,6 +274,7 @@ def build_menu() -> pystray.Menu:
             enabled=lambda item: recorder.is_recording,
         ),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Что записывать", build_monitor_menu()),
         pystray.MenuItem(
             "Настроить Groq-ключ...",
             lambda icon, item: tk_root.after(0, lambda: open_settings_dialog(icon)),

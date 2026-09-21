@@ -8,6 +8,7 @@ from pathlib import Path
 
 import config
 import ffmpeg_utils
+import monitors
 from audio_capture import AudioCaptureError, AudioRecorder
 
 CREATE_NO_WINDOW = 0x08000000
@@ -15,6 +16,16 @@ CREATE_NO_WINDOW = 0x08000000
 
 class RecordingError(Exception):
     pass
+
+
+def _selected_region() -> dict | None:
+    """The monitor to record, or None for the whole desktop."""
+    if config.MONITOR == "all":
+        return None
+    if config.MONITOR == "cursor":
+        return monitors.monitor_at_cursor()
+    # A screen that has since been unplugged falls back to the whole desktop.
+    return monitors.find_monitor(config.MONITOR)
 
 
 class Recorder:
@@ -61,6 +72,10 @@ class Recorder:
             cmd = [ffmpeg_path, "-y", "-hide_banner", "-loglevel", "warning"]
             if sources:
                 cmd += ["-copyts"]
+            region = _selected_region()
+            if region:
+                cmd += ["-offset_x", str(region["x"]), "-offset_y", str(region["y"]),
+                        "-video_size", f"{region['width']}x{region['height']}"]
             cmd += ["-f", "gdigrab", "-framerate", "30", "-i", "desktop"]
             cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", str(raw_video_path)]
 
