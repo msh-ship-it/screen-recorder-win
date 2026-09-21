@@ -221,6 +221,23 @@ def select_monitor(icon: pystray.Icon, value: str):
     icon.update_menu()
 
 
+def _monitor_item(number: int, monitor: dict) -> pystray.MenuItem:
+    # pystray requires the action to take exactly (icon, item), so the monitor
+    # name is bound through a closure rather than a default argument.
+    name = monitor["name"]
+    label = f"Экран {number} — {monitor['width']}×{monitor['height']}"
+    if monitor["primary"]:
+        label += " (основной)"
+
+    def action(icon, item):
+        select_monitor(icon, name)
+
+    def checked(item):
+        return config.MONITOR == name
+
+    return pystray.MenuItem(label, action, checked=checked, radio=True)
+
+
 def build_monitor_menu() -> pystray.Menu:
     items = [
         pystray.MenuItem(
@@ -238,16 +255,7 @@ def build_monitor_menu() -> pystray.Menu:
         pystray.Menu.SEPARATOR,
     ]
     for number, monitor in enumerate(monitors.list_monitors(), start=1):
-        name = monitor["name"]
-        label = f"Экран {number} — {monitor['width']}×{monitor['height']}"
-        if monitor["primary"]:
-            label += " (основной)"
-        items.append(pystray.MenuItem(
-            label,
-            lambda icon, item, name=name: select_monitor(icon, name),
-            checked=lambda item, name=name: config.MONITOR == name,
-            radio=True,
-        ))
+        items.append(_monitor_item(number, monitor))
     return pystray.Menu(*items)
 
 
