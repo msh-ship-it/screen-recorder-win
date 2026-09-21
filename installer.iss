@@ -1,5 +1,5 @@
 #define MyAppName "Screen Recorder"
-#define MyAppVersion "1.4.1"
+#define MyAppVersion "1.4.2"
 #define MyAppExeName "ScreenRecorder.exe"
 
 [Setup]
@@ -21,8 +21,8 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "Создать значок на рабочем столе"; GroupDescription: "Дополнительно:"
-Name: "startupicon"; Description: "Запускать при включении компьютера"; GroupDescription: "Дополнительно:"
+Name: "desktopicon"; Description: "Создать значок на рабочем столе"; GroupDescription: "Дополнительно:"; Flags: checkedonce
+Name: "startupicon"; Description: "Запускать при включении компьютера"; GroupDescription: "Дополнительно:"; Flags: checkedonce
 
 [Files]
 Source: "dist\ScreenRecorder\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
