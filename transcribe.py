@@ -173,13 +173,39 @@ def _format_timecode(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def _segment_line(segment: dict) -> str:
-    speaker = f"{segment['speaker']}: " if segment.get("speaker") else ""
-    return f"[{_format_timecode(segment['start'])}] {speaker}{segment['text']}"
+def group_turns(segments: list[dict], max_gap: float = 20.0, max_chars: int = 700) -> list[dict]:
+    """Склеивает подряд идущие фразы в реплики: таймкод ставится на начало реплики,
+    а не на каждую строчку. Новая реплика начинается, когда сменился говорящий,
+    после долгой паузы или когда абзац разросся до нечитаемого.
+    """
+    turns: list[dict] = []
+    for segment in segments:
+        speaker = segment.get("speaker")
+        current = turns[-1] if turns else None
+        same_speaker = current is not None and current.get("speaker") == speaker
+        short_pause = current is not None and segment["start"] - current["end"] <= max_gap
+        room_left = current is not None and len(current["text"]) < max_chars
+
+        if current is not None and same_speaker and short_pause and room_left:
+            current["text"] += " " + segment["text"]
+            current["end"] = segment["end"]
+        else:
+            turns.append({
+                "start": segment["start"],
+                "end": segment["end"],
+                "speaker": speaker,
+                "text": segment["text"],
+            })
+    return turns
+
+
+def _turn_line(turn: dict) -> str:
+    speaker = f"{turn['speaker']}: " if turn.get("speaker") else ""
+    return f"[{_format_timecode(turn['start'])}] {speaker}{turn['text']}"
 
 
 def segments_to_text(segments: list[dict]) -> str:
-    return "\n".join(_segment_line(s) for s in segments)
+    return "\n".join(_turn_line(t) for t in group_turns(segments))
 
 
 def has_speakers(segments: list[dict]) -> bool:
@@ -221,8 +247,8 @@ def build_docx(
         doc.add_paragraph(
             f"«{SPEAKER_ME}» — автор записи (микрофон), «{SPEAKER_OTHER}» — все остальные участники звонка."
         )
-    for segment in segments:
-        doc.add_paragraph(_segment_line(segment))
+    for turn in group_turns(segments):
+        doc.add_paragraph(_turn_line(turn))
 
     docx_path = config.TRANSCRIPTS_DIR / f"{recording_path.stem}_transcript.docx"
     try:

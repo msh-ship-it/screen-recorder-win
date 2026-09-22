@@ -1,5 +1,5 @@
 #define MyAppName "Screen Recorder"
-#define MyAppVersion "1.4.2"
+#define MyAppVersion "1.5.0"
 #define MyAppExeName "ScreenRecorder.exe"
 
 [Setup]
