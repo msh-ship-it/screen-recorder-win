@@ -12,6 +12,9 @@ GROQ_API_KEY = user_config.get("groq_api_key") or os.environ.get("GROQ_API_KEY",
 GROQ_API_KEY_2 = user_config.get("groq_api_key_2") or os.environ.get("GROQ_API_KEY_2", "").strip()
 GROQ_MODEL = os.environ.get("SCREENRECORDER_GROQ_MODEL", "whisper-large-v3-turbo").strip()
 GROQ_SUMMARY_MODEL = os.environ.get("SCREENRECORDER_SUMMARY_MODEL", "openai/gpt-oss-120b").strip()
+# Язык записи. Пустая строка вернёт автоопределение Whisper — не рекомендуется:
+# на невнятных фрагментах он переключается на другой язык и выдумывает текст.
+TRANSCRIBE_LANGUAGE = os.environ.get("SCREENRECORDER_LANGUAGE", "ru").strip()
 
 # Optional override, e.g. "Микрофон (Realtek High Definition Audio)"
 MIC_DEVICE_OVERRIDE = user_config.get("mic_device") or os.environ.get("SCREENRECORDER_MIC_DEVICE", "").strip()

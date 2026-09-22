@@ -98,6 +98,9 @@ def _post_to_groq(file_path: Path, api_key: str):
                 "model": config.GROQ_MODEL,
                 "response_format": "verbose_json",
                 "temperature": "0",
+                # Без явного языка Whisper определяет его для каждого куска отдельно и на
+                # тихом или невнятном фрагменте срывается в английский, выдумывая текст.
+                "language": config.TRANSCRIBE_LANGUAGE,
                 "timestamp_granularities[]": ["segment", "word"],
             },
             timeout=300,
@@ -177,6 +180,20 @@ def _format_timecode(seconds: float) -> str:
 # ничего не значат, но разрывают чужую реплику пополам. «Да», «нет» и «окей» сюда
 # намеренно не входят — это может быть ответ по делу.
 _FILLERS = {"угу", "ага", "мгм", "ммм", "мм", "эм", "хм", "ай", "ой"}
+# Короткие, но осмысленные: их нельзя выбросить по длине — это может быть ответ по делу.
+_KEEP_SHORT = {"да", "ок", "нет", "не", "ага?"}
+
+
+def _is_foreign_hallucination(text: str) -> bool:
+    """Целая фраза без единой кириллической буквы при записи на русском — это почти
+    всегда срыв Whisper в другой язык. Отдельные «CRM» и «Google» остаются: условие
+    срабатывает только на нескольких латинских словах подряд.
+    """
+    if not config.TRANSCRIBE_LANGUAGE.startswith("ru"):
+        return False
+    if re.search(r"[а-яё]", text, re.IGNORECASE):
+        return False
+    return len(re.findall(r"[A-Za-z]{2,}", text)) >= 3
 
 
 def _is_noise(text: str) -> bool:
@@ -185,6 +202,10 @@ def _is_noise(text: str) -> bool:
         return True
     if cleaned in _FILLERS:
         return True
+    if _is_foreign_hallucination(text):
+        return True
+    if cleaned in _KEEP_SHORT:
+        return False
     return " " not in cleaned and len(cleaned) <= 2
 
 
