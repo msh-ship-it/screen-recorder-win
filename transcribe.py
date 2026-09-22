@@ -173,6 +173,21 @@ def _format_timecode(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+# Поддакивания и обрывки шума, которые Whisper домысливает в одну-две буквы. Они
+# ничего не значат, но разрывают чужую реплику пополам. «Да», «нет» и «окей» сюда
+# намеренно не входят — это может быть ответ по делу.
+_FILLERS = {"угу", "ага", "мгм", "ммм", "мм", "эм", "хм", "ай", "ой"}
+
+
+def _is_noise(text: str) -> bool:
+    cleaned = text.strip().strip(".,!?…-–—«»\"'").lower()
+    if not cleaned:
+        return True
+    if cleaned in _FILLERS:
+        return True
+    return " " not in cleaned and len(cleaned) <= 2
+
+
 def group_turns(segments: list[dict], max_gap: float = 20.0, max_chars: int = 700) -> list[dict]:
     """Склеивает подряд идущие фразы в реплики: таймкод ставится на начало реплики,
     а не на каждую строчку. Новая реплика начинается, когда сменился говорящий,
@@ -180,6 +195,8 @@ def group_turns(segments: list[dict], max_gap: float = 20.0, max_chars: int = 70
     """
     turns: list[dict] = []
     for segment in segments:
+        if _is_noise(segment["text"]):
+            continue
         speaker = segment.get("speaker")
         current = turns[-1] if turns else None
         same_speaker = current is not None and current.get("speaker") == speaker
